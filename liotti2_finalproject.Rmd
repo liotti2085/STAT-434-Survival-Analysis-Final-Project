@@ -1,0 +1,149 @@
+---
+title: "STAT 434 Final Project"
+author: "Nick Liotti, liotti2"
+date: "December 5, 2018"
+output: word_document
+---
+
+```{r}
+library(survival)
+library(survRM2)
+library(survC1)
+library(glmnet)
+load("train.RData")
+```
+
+#####Add features
+```{r}
+outcome_train$enrolledon = as.Date(outcome_train$enrolledon, format = "%m/%d/%Y")
+outcome_train$lastcontactdate = as.Date(outcome_train$lastcontactdate, format = "%m/%d/%Y")
+outcome_train$deathdate = as.Date(outcome_train$deathdate, format = "%m/%d/%Y")
+outcome_train$delta = ifelse(is.na(outcome_train$deathdate), 0, 1)
+outcome_train$days = difftime(outcome_train$lastcontactdate, outcome_train$enrolledon, units = "days")
+```
+
+
+####Descriptive Stats 1
+```{r}
+km = survfit(Surv(days, delta) ~ 1, data = outcome_train, conf.type = "log-log")
+
+plot(km, xlab = "Time (Days)", ylab = "Proability", main = "Kaplan Meier Survival Estimates")
+```
+
+
+####Descriptive Stats 2
+```{r}
+with(outcome_train, survRM2:::rmst1(days, delta, tau = 1825))
+```
+
+#####Important Genes
+***(logrank)***
+```{r}
+pvals = rep(0, dim(expr_train)[1])
+
+for (i in 1:dim(expr_train)[1]) {
+  med = median(expr_train[i, ])
+  
+  for (j in 1:dim(expr_train)[2]) {
+    outcome_train$group[j] = (expr_train[i, j] >= med)
+  }
+  
+  logrank = survdiff(Surv(days, delta) ~ group, data = outcome_train)
+  p.val <- 1 - pchisq(logrank$chisq, length(logrank$n) - 1)
+  pvals[i] = p.val
+}
+
+id = which(rank(pvals) <= 10)
+
+p = pvals[rank(pvals) <= 10]
+
+p2 = cbind(id, p)
+
+p3 = sort(p2[,2], index.return = TRUE)
+
+id = p2[p3$ix]
+
+genes1 = row.names(expr_train[id, ])
+```
+
+***(Cox pval & C Stat)***
+```{r}
+pvals2 = rep(0, dim(expr_train)[1])
+cval = rep(0, dim(expr_train)[1])
+
+for (i in 1:dim(expr_train)[1]) {
+  
+  newd = data.frame(gene = expr_train[i, ])  
+     
+  for (j in 1:dim(expr_train)[2]) {
+     
+    outcome_train$gene[j] = expr_train[i, j]
+   
+  }
+  
+  fit = coxph(Surv(days, delta) ~ gene, data = outcome_train)
+  
+  train_score = predict(fit, newdata = newd, type = "risk")
+  
+  C = Est.Cval(cbind(outcome_train$days, outcome_train$delta, train_score), 
+           tau = 1825, nofit = TRUE)$Dhat
+  
+  cval[i] = C
+  pvals2[i] <- summary(fit)$wald[3]
+  
+}
+
+id = which(rank(pvals2) <= 10)
+id2 = which(rank(cval) >= length(cval) - 9)
+
+p = pvals2[rank(pvals2) <= 10]
+c2 = cval[rank(cval) >= length(cval) - 9]
+
+p2 = cbind(id, p)
+c3 = cbind(id, c2)
+
+p3 = sort(p2[,2], index.return = TRUE)
+c4 = sort(c3[,2], index.return = TRUE, decreasing = TRUE)
+
+id = p2[p3$ix]
+id2 = c3[c4$ix]
+
+genes2 = row.names(expr_train[id, ])
+genes3 = row.names(expr_train[id2, ])
+```
+
+####Trial Design
+***(a)***
+```{r}
+deaths = ceiling((qnorm(.025)+qnorm(.1))^2 / (.5^2*log(.5)^2))
+```
+
+***(b)***
+```{r}
+S_control = stepfun(km$time, c(1, km$surv))
+S_treat = stepfun(km$time, c(1, (km$surv)^2))
+
+S = function(x, p) {
+  p * S_control(x) + (1 - p) * S_treat(x)
+}
+
+a = 365
+f = 1095
+p = .5
+
+prob = 1 - 1/6 * (S(f, p) + 4 * S(.5 * a + f, p) + S(a + f, p))
+
+n = ceiling(deaths / prob)
+```
+
+
+####Prediction
+```{r}
+train = t(expr_train)
+test = t(expr_test)
+myfit = cv.glmnet(train, Surv(outcome_train$days, outcome_train$delta), family = "cox")
+score = predict(myfit, test, type = "link", s = "lambda.min")
+
+save(score, file = "score.Rdata")
+```
+
